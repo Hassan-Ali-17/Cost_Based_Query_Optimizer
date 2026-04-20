@@ -7,7 +7,7 @@
 
 ## Group 12
 
-| Name | Registration Number |
+| Name | RoleNumber |
 |------|-------------------|
 | Hassan Ali Shah | BSCS24040 |
 | Abdul Moeed | BSCS24140 |
