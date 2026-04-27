@@ -1,0 +1,45 @@
+{
+  "tables": [
+    {
+      "name": "products",
+      "row_count": 2000,
+      "columns": [
+        {"name": "id", "distinct": 2000, "min": 1, "max": 2000},
+        {"name": "name", "distinct": 2000, "min": 0, "max": 0},
+        {"name": "category", "distinct": 2, "min": 0, "max": 0},
+        {"name": "supplier_id", "distinct": 90, "min": 1, "max": 90}
+      ]
+    },
+    {
+      "name": "line_items",
+      "row_count": 20000,
+      "columns": [
+        {"name": "order_id", "distinct": 10000, "min": 1, "max": 10000},
+        {"name": "product_id", "distinct": 2000, "min": 1, "max": 2000},
+        {"name": "qty", "distinct": 5, "min": 1, "max": 5},
+        {"name": "price", "distinct": 500, "min": 1, "max": 500}
+      ]
+    },
+    {
+      "name": "orders",
+      "row_count": 10000,
+      "columns": [
+        {"name": "id", "distinct": 10000, "min": 1, "max": 10000},
+        {"name": "customer_id", "distinct": 1000, "min": 1, "max": 1000},
+        {"name": "total", "distinct": 1000, "min": 10, "max": 1009},
+        {"name": "year", "distinct": 5, "min": 2020, "max": 2024},
+        {"name": "status", "distinct": 1, "min": 0, "max": 0}
+      ]
+    },
+    {
+      "name": "customers",
+      "row_count": 1000,
+      "columns": [
+        {"name": "id", "distinct": 1000, "min": 1, "max": 1000},
+        {"name": "name", "distinct": 1000, "min": 0, "max": 0},
+        {"name": "country", "distinct": 3, "min": 0, "max": 0},
+        {"name": "age", "distinct": 50, "min": 18, "max": 67}
+      ]
+    }
+  ]
+}
