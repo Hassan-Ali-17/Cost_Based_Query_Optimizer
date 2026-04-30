@@ -68,6 +68,7 @@ The Materialized Execution Engine.
 
 ### 7. `main.cpp`
 The Entry Point and REPL Shell.
+- The Main program of our project
 - Wires the Catalog, Parser, Planner, and Executor together.
 - Handles standard user commands (`LOAD`, `QUERY`, `EXPLAIN`, `stats`, `exit`).
 - Neatly formats and prints the column headers and row data returned by the Executor.
