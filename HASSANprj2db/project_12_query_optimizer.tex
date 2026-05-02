@@ -1,0 +1,467 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{style_minimal}
+
+\fancyhead[L]{\small\textbf{Project 02}}
+\fancyhead[R]{\small Cost-Based Query Optimizer}
+\fancyfoot[C]{\small\thepage}
+
+\begin{document}
+
+\projecttitle{Cost-Based SQL Query Optimizer}{C or C++}
+
+\section{Problem Statement}
+
+You will build a SQL query optimizer that answers the central question every real database engine has to answer: given a SQL query that joins multiple tables and filters them with predicates, in what order should the joins be performed and which rewrites should be applied first, to make the query run as fast as possible? The same query has many possible execution plans --- some run in milliseconds, others take minutes --- and the optimizer's job is to pick a good one without trying them all.
+
+This project differs from the simpler version that other classes assign in three specific ways. First, the supported query subset includes joins of up to four tables, not just two; this is the size at which join ordering starts to matter dramatically and where the optimizer's choices are clearly visible in the benchmark numbers. Second, the optimizer is driven by an actual cost model: it maintains catalog statistics for every table and column (row counts, distinct values, value ranges) and uses standard cardinality estimation formulas to predict how big each intermediate result will be. Third, the optimizer applies a set of rewrite rules in addition to choosing a join order; you will implement four rules that any production optimizer also implements, plus the Selinger-style dynamic programming algorithm for join ordering, the same algorithm that has been at the core of System R, PostgreSQL, and DB2 since 1979.
+
+The shape of the project is: a parser that accepts a small SQL subset, a catalog that holds table statistics, a logical-plan representation, a rule-based rewriter that applies four cleanup transformations, a join-order search that uses dynamic programming over a cost function, a materialized executor that runs the chosen plan, and a benchmark that compares the optimizer's chosen plans against several baselines (no optimizer at all, rewrites only without join ordering, join ordering only without rewrites). The benchmark is the headline deliverable: it makes the optimizer's value visible by showing speedups in the 100$\times$ to 1000$\times$ range on adversarial queries and quantifies the contribution of each component.
+
+You are not building a complete SQL database. There are no transactions, no indexes, no concurrent queries, and no SQL features beyond the supported subset (which is precisely defined in Section 5). The executor is the same materialized model used in the simpler version of this project: each operator is a function that takes a list of rows and returns a list of rows, with no Volcano iterators, no pipelining, and no parallelism. The reason for keeping the executor simple is that the project is about the optimizer; a sophisticated executor would compete for time without teaching anything new about query planning.
+
+This project is one of the harder ones in Project 02. The difficulty is concentrated in two places: cardinality estimation (cost models that produce wildly wrong estimates make the optimizer choose worse plans than no optimization at all, and the chaos test will show this), and the join-ordering DP (the algorithm is short but indexing into the bitmap of subsets needs to be exact). Plan time for instrumenting your cost estimates against actual runtime sizes during development; this is what real database engineers do, and your design document will require you to discuss your estimates' accuracy.
+
+\section{What the Final Product Looks Like}
+
+When your project is complete, you can compile the binary, load the benchmark dataset, and watch the optimizer make visibly different plan choices than the unoptimized baseline.
+
+\begin{codebox}
+\begin{lstlisting}
+$ make
+$ ./qopt --data ./benchdata
+qopt: opened catalog with 4 tables
+  customers      10,000 rows  (id INT PK, name TEXT, country TEXT, age INT)
+  orders        500,000 rows  (id INT PK, customer_id INT, total DOUBLE,
+                               year INT, status TEXT)
+  line_items  2,000,000 rows  (order_id INT, product_id INT, qty INT,
+                               price DOUBLE)
+  products       50,000 rows  (id INT PK, name TEXT, category TEXT,
+                               supplier_id INT)
+qopt: stats loaded for 4 tables, 16 columns
+
+qopt> SELECT customers.name, SUM(line_items.qty * line_items.price)
+      FROM customers, orders, line_items
+      WHERE customers.id = orders.customer_id
+        AND orders.id = line_items.order_id
+        AND customers.country = 'PK'
+        AND orders.year = 2024;
+
+--- WITHOUT optimizer (left-deep, FROM order, no rewrites) ---
+plan:
+  HashJoin(orders.id = line_items.order_id)
+    HashJoin(customers.id = orders.customer_id)
+      Filter(country='PK' AND year=2024)
+        CrossProduct
+          SeqScan(customers)              [10K rows]
+          SeqScan(orders)                 [500K rows -> 5B intermediate]
+      SeqScan(line_items)
+estimated cost: 5,247,180,200
+actual time: 12.83 seconds, 412 result rows
+
+--- WITH optimizer (rules + cost-based DP join ordering) ---
+plan:
+  HashJoin(orders.id = line_items.order_id)
+    HashJoin(customers.id = orders.customer_id)
+      Filter(country='PK')
+        SeqScan(customers)               [est 41 rows, actual 39]
+      Filter(year=2024)
+        SeqScan(orders)                  [est 71K rows, actual 71K]
+    SeqScan(line_items)                  [reads on demand via hash probe]
+estimated cost: 2,840,120
+actual time: 0.124 seconds, 412 result rows
+
+speedup: 103.5x
+plan cost ratio: 1847x
+estimate error: cust 5%, orders 0.4%, joined 7%
+
+qopt> \stats
+queries executed:    1
+optimizer wins:      1 (avg speedup 103.5x)
+average plan time:   2.1ms
+average exec time:   124ms
+\end{lstlisting}
+\end{codebox}
+
+The defining moment of this session is the side-by-side plan comparison. The unoptimized version computes a 10K $\times$ 500K cross product before filtering --- 5 billion intermediate rows --- because it follows the FROM clause order naively. The optimized version filters \texttt{customers} down to 41 rows first (using the predicate \texttt{country = 'PK'}), then joins to a filtered \texttt{orders} (71K rows), then probes \texttt{line\_items} via a hash join. The plan touches three orders of magnitude less data and runs three orders of magnitude faster. The optimizer's cost estimate (about 1800$\times$ better than the baseline) accurately predicted that the new plan would be much better, and the runtime measurement confirms it.
+
+\section{Architectural Overview}
+
+The system has six components. Keep them strictly separated.
+
+\begin{codebox}
+\begin{lstlisting}
+                  [ SQL query string ]
+                          |
+                          v
+                  +---------------+
+                  |  Parser       |  produces a logical plan tree
+                  +-------+-------+
+                          |
+                          v
+                  +---------------+
+                  |  Catalog      |  table schemas, row counts,
+                  |  (Section 6)  |  per-column statistics
+                  +-------+-------+
+                          |
+                          v
+                  +---------------+
+                  |  Rule         |  predicate pushdown,
+                  |  rewriter     |  projection pushdown,
+                  |  (Section 7)  |  constant folding, join swap
+                  +-------+-------+
+                          |
+                          v
+                  +---------------+
+                  |  Cost model   |  cardinality + cost estimates
+                  |  (Section 8)  |  using the catalog stats
+                  +-------+-------+
+                          |
+                          v
+                  +---------------+
+                  |  Join-order   |  Selinger DP over subsets
+                  |  search       |  of base tables
+                  |  (Section 9)  |
+                  +-------+-------+
+                          |
+                          v
+                  +---------------+
+                  |  Executor     |  materialized operator model
+                  |  (Section 10) |  (same as simpler version)
+                  +---------------+
+\end{lstlisting}
+\end{codebox}
+
+The pipeline is strictly top to bottom: the parser produces a logical plan, the rewriter cleans it up, the cost model and join-order search work together to choose a physical plan, and the executor runs it. There are no back-edges. This is the textbook structure of every real query optimizer, just stripped down.
+
+\section{The Supported SQL Subset}
+
+The grammar is precisely:
+
+\begin{codebox}
+\begin{lstlisting}
+query    := SELECT select_list
+            FROM table (, table)*
+            [WHERE pred (AND pred)*]
+            [GROUP BY column]
+            [LIMIT integer]
+
+select_list := * | expr (, expr)*
+expr        := column
+             | aggregate(column)
+             | column op column        (e.g., qty * price)
+             | literal
+aggregate   := SUM | COUNT | AVG | MIN | MAX
+
+pred        := column op literal       (e.g., year = 2024)
+             | column op column        (e.g., customers.id = orders.customer_id)
+op          := = | < | <= | > | >= | !=
+\end{lstlisting}
+\end{codebox}
+
+Multiple tables in the FROM clause are joined: every pair of tables in the FROM produces a join, and the join condition is whichever WHERE predicate compares columns from those two tables. Predicates that compare a column to a literal (like \texttt{year = 2024}) are filters. Predicates with \texttt{AND} are independent; \texttt{OR} is not supported. Subqueries, ORDER BY, HAVING, DISTINCT, and OUTER JOIN are all out of scope.
+
+The parser is a hand-written recursive-descent parser, the same shape as in the simpler version of this project. It is about 250 lines of C and produces a small logical-plan tree of the form:
+
+\begin{codebox}
+\begin{lstlisting}
+LogicalPlan := Scan(table)
+             | Filter(pred, child)
+             | Join(condition, left, right)         (binary, hash join)
+             | Project(exprs, child)
+             | GroupBy(column, agg, child)
+             | Limit(n, child)
+\end{lstlisting}
+\end{codebox}
+
+A query like \texttt{SELECT * FROM a, b WHERE a.x = b.y AND a.z > 10} parses initially into something like \texttt{Project(*, Filter(a.x=b.y AND a.z>10, Join(true, Scan(a), Scan(b))))} --- a deliberately bad starting plan with a no-condition join (effectively a cross product) and all predicates piled on top. The optimizer's job is to turn this into a good plan.
+
+\section{The Catalog and Statistics}
+
+Every real optimizer relies on a catalog of metadata about each table. For this project, the catalog holds:
+
+\subsection{Per Table}
+\begin{itemize}
+\item \texttt{name}: the table's name.
+\item \texttt{columns}: an ordered list of (name, type) pairs.
+\item \texttt{row\_count}: the number of rows in the table.
+\end{itemize}
+
+\subsection{Per Column}
+\begin{itemize}
+\item \texttt{distinct\_count}: the number of distinct values in the column.
+\item \texttt{min\_value} and \texttt{max\_value}: the smallest and largest values seen (only meaningful for numeric columns; for strings, leave them empty and use a fallback in the estimator).
+\item \texttt{null\_count}: the number of NULL values. For this project, the data is null-free, so this is always 0; the field exists for completeness.
+\end{itemize}
+
+These are the standard ``base statistics'' that every textbook cost model uses. They are deliberately small; per-column histograms (which are vastly more accurate but harder to implement) are an explicit bonus.
+
+\subsection{Building the Catalog}
+At startup, the engine reads each table's CSV file and computes the statistics in a single pass. This takes a few seconds for the benchmark dataset and produces a small \texttt{catalog.json} file that is cached for subsequent runs.
+
+\subsection{Why Statistics Matter}
+The cost model in Section 8 uses these statistics to estimate intermediate result sizes. A wrong estimate produces a wrong cost, which makes the optimizer pick a wrong plan. The classic failure case: if the optimizer thinks a filter is selective (will keep only 1\% of rows) when it is actually unselective (keeps 50\%), it will join the filtered table early in the plan, but the resulting intermediate is much bigger than predicted and the rest of the plan is suboptimal. Your benchmark must include cases where your estimates are accurate (the optimizer wins) and the design document must discuss any cases where they are not.
+
+\section{The Rule Rewriter}
+
+Before doing any join-order search, the optimizer applies a fixed set of rewrite rules. Each rule is a function \texttt{rule(plan) -> plan} that returns a new plan with the rule applied as many times as it can be (typically using a recursive walk of the tree). The optimizer applies rules in a fixed order until none of them changes the plan further (a fixed point).
+
+You will implement exactly four rules:
+
+\subsection{Predicate Pushdown}
+A \texttt{Filter} sitting on top of a \texttt{Join} can be split, with each conjunct pushed down to whichever child can evaluate it. The conjunct \texttt{a.country = 'PK'} on top of \texttt{Join(Scan(a), Scan(b))} becomes \texttt{Join(Filter(a.country='PK', Scan(a)), Scan(b))}. Conjuncts that reference both sides of the join (the join condition itself, like \texttt{a.id = b.customer\_id}) stay attached to the join.
+
+This is the most important rewrite. It is the one that produces the dramatic speedups you saw in the example session. Implementing it correctly requires distinguishing single-table conjuncts (push down) from multi-table conjuncts (keep as the join condition or as a higher filter).
+
+\subsection{Projection Pushdown}
+A \texttt{Project} that selects only some columns can be pushed down through joins and filters, so that intermediate results carry only the columns that downstream operators actually need. \texttt{Project([a.name], Join(Scan(a), Scan(b)))} where \texttt{b}'s columns are not used downstream becomes \texttt{Project([a.name], Join(Project([a.id, a.name], Scan(a)), Project([b.id], Scan(b))))} --- each scan now only reads the columns that participate in the join condition or the final select list.
+
+Computing which columns are ``needed'' requires a small upward analysis: walk the tree, collecting the set of column references in the SELECT list, in any predicate, and in every join condition. Push this set as a constraint on each child. Test this rule carefully; an off-by-one will produce a plan that runs but returns wrong data.
+
+\subsection{Constant Folding}
+A predicate like \texttt{2024 = 2024} or \texttt{1 < 2} can be evaluated at planning time and replaced with \texttt{TRUE} or \texttt{FALSE}. A \texttt{TRUE} conjunct can be removed; a \texttt{FALSE} conjunct turns the entire filter into ``no rows'' (which the optimizer can use to skip the rest of the plan entirely). Compound expressions like \texttt{2024 = year} stay; only fully literal expressions fold.
+
+This rule is small but valuable because it interacts with predicate pushdown: a predicate that reduces to \texttt{FALSE} after folding can prune entire branches. Test this case.
+
+\subsection{Join Input Swap}
+The hash join builds a hash table on its left input and probes with its right input. For a hash join to be efficient, the build side should be the smaller relation. After cost estimation has run, the optimizer can compare the estimated sizes of the two inputs and swap them if needed: \texttt{Join(condition, left, right)} becomes \texttt{Join(condition, right, left)} when the right is estimated to be smaller. This is a physical-plan rewrite (it runs after the join-order search has chosen which tables to join, but before the executor receives the plan).
+
+\subsection{Application Order}
+Apply the rules in this order:
+\begin{enumerate}
+\item Constant folding (resolves trivial predicates and possibly prunes branches).
+\item Predicate pushdown (moves filters as low as possible).
+\item Projection pushdown (limits column propagation).
+\item Repeat 1--3 until no change (typically 1 or 2 iterations are enough).
+\item Run the join-order search (Section 9), which produces a new plan tree.
+\item Apply join input swap on the result based on cost estimates.
+\end{enumerate}
+
+\section{The Cost Model}
+
+The cost of a plan is computed bottom-up, with each operator contributing some cost based on the size of its input(s). The convention this project uses is dimensionless: 1 unit per row read or written or processed. Specifically:
+
+\subsection{Cardinality Estimation}
+Each operator emits some number of rows. The estimator computes this number based on the input cardinalities and per-column statistics:
+
+\begin{itemize}
+\item \texttt{Scan(t)}: emits \texttt{t.row\_count} rows.
+\item \texttt{Filter(pred, child)}: emits \texttt{child.cardinality * selectivity(pred)} rows. Selectivity formulas for individual predicates:
+\begin{itemize}
+\item \texttt{col = literal}: $\frac{1}{\texttt{distinct\_count(col)}}$. (If the literal is in the min--max range; if outside, selectivity is 0.)
+\item \texttt{col != literal}: $1 - \frac{1}{\texttt{distinct\_count(col)}}$.
+\item \texttt{col < literal} or similar range: estimate as the fraction of the min--max range that satisfies the predicate. For integer columns, this is $(\texttt{literal} - \texttt{min}) / (\texttt{max} - \texttt{min})$, clamped to $[0, 1]$.
+\item Multiple conjuncts (\texttt{AND}): assume independence and multiply the selectivities. This is the standard assumption and is often wrong for correlated columns, which is why real optimizers also have multi-column statistics. For this project, the simple independence assumption is acceptable.
+\end{itemize}
+\item \texttt{Join(condition, left, right)}: for an equijoin on \texttt{left.col1 = right.col2}, the standard estimate is \\
+$\frac{\texttt{left.cardinality} \cdot \texttt{right.cardinality}}{\max(\texttt{distinct\_count(left.col1)}, \texttt{distinct\_count(right.col2)})}$. \\
+This is the standard System R formula. For a cross product (no condition), the cardinality is the product. The output column statistics are inherited from the inputs (use the maximum of the two distinct counts when both sides have a column with the same name).
+\item \texttt{Project, Limit, GroupBy}: simple to estimate; defer to the obvious formulas.
+\end{itemize}
+
+\subsection{Cost Function}
+For each operator, the cost is its input cardinalities plus its output cardinality, with a small multiplier based on operator type:
+
+\begin{itemize}
+\item \texttt{Scan(t)}: \texttt{t.row\_count} (the cost of reading every row).
+\item \texttt{Filter(pred, child)}: \texttt{child.cost + child.cardinality} (read every input row, decide).
+\item \texttt{Join(cond, left, right)} as a hash join: \texttt{left.cost + right.cost + 2 * left.cardinality + right.cardinality + output.cardinality}. The build-side input is read twice (once to read it, once to hash it); the probe-side is read once; the output is materialized.
+\item \texttt{CrossProduct}: \texttt{left.cost + right.cost + left.cardinality * right.cardinality}. This is intentionally enormous to bias the optimizer away from cross products.
+\item \texttt{Project, Limit, GroupBy}: \texttt{child.cost + child.cardinality}.
+\end{itemize}
+
+The exact constants do not matter much; what matters is that the cost grows correctly with cardinality so that bad plans (huge intermediate results) are correctly identified as expensive.
+
+\subsection{Validating Estimates}
+Your design document must include an ``estimate accuracy'' table for the benchmark queries. For each query, run the chosen plan, instrument the executor to record the actual cardinality of each intermediate result, and compare to the estimated cardinality. Report the ratio. A ratio between 0.5 and 2 is good; between 0.1 and 10 is acceptable; outside that range, your estimator is broken and you should investigate before submitting.
+
+\section{Join-Order Search}
+
+This is the centerpiece of the project. Given a set of $n$ base tables (after pushdown has filtered them) and a set of join conditions between them, find the cheapest left-deep binary join tree that joins all $n$.
+
+\subsection{Why Left-Deep}
+A binary join tree is \textit{left-deep} if every join's right input is a base table (a single \texttt{Scan} or \texttt{Filter(Scan)}, never another \texttt{Join}). This restricts the search space dramatically: with $n$ tables, there are $n!$ left-deep trees, instead of $\frac{(2(n-1))!}{(n-1)!}$ for general binary trees (which is 30 for $n=4$ rather than 120). Real optimizers since System R use left-deep trees as the default because they pipeline well and the search is tractable.
+
+For the base project, left-deep only. Bushy join trees (where the right side can also be a join) are a bonus.
+
+\subsection{Selinger DP}
+The classic dynamic programming algorithm, due to Selinger et al. (System R, 1979). The state is a subset of the base tables; the DP value is the cheapest left-deep plan that joins exactly that subset.
+
+\begin{enumerate}
+\item Represent each subset of the $n$ base tables as a bitmap of $n$ bits. With $n \leq 4$ (or up to 8 in the bonus), an \texttt{int} or \texttt{long} suffices.
+
+\item For every singleton subset $\{t\}$, the best plan is \texttt{Scan(t)} (or \texttt{Filter(p, Scan(t))} if a predicate has been pushed down). Record its cost and cardinality.
+
+\item For every subset $S$ of size $\geq 2$, in increasing order of size, iterate over every way to split $S$ into a non-empty left part $L$ and a singleton right part $\{t\}$ with $t \in S$. For each split:
+\begin{enumerate}
+\item Look up the best plan for $L$ (already computed).
+\item The right side is the base table $t$ with any pushed-down filters.
+\item If there is no join condition between $L$ and $t$ (no predicate connecting any table in $L$ to $t$), this split is a cross product; skip it unless this is the only option.
+\item Otherwise, compute the cost of \texttt{HashJoin(condition, plan(L), Scan(t))}.
+\end{enumerate}
+The best plan for $S$ is whichever split has the smallest cost.
+
+\item The answer is the best plan for the full subset $\{t_1, \ldots, t_n\}$.
+\end{enumerate}
+
+The total work is $O(n \cdot 2^n)$ to fill the table and $O(n)$ per cell to enumerate splits, so $O(n^2 \cdot 2^n)$. For $n = 4$, this is 64 operations; for $n = 8$, 16{,}384. The algorithm scales well up to about 12 tables, beyond which memory becomes the limit. This project's queries are limited to $n \leq 4$, so the search is essentially instantaneous.
+
+\subsection{Connecting Back to the Plan Tree}
+After the DP completes, you have the cost of the cheapest plan but not the plan tree itself. Either store the chosen split alongside each subset's cost (so you can reconstruct the tree by walking back), or store the actual best plan tree directly (more memory, simpler code). For four tables, both are fine.
+
+\section{The Executor}
+
+Same as the simpler version of this project: a materialized model in which each operator is a function that takes input rows and returns output rows, with no state held between calls. The six operators are \texttt{Scan, Filter, Project, CrossProduct, HashJoin, Limit}, plus \texttt{GroupBy} (which is new for this project).
+
+\texttt{GroupBy(col, agg, child)} reads every row from the child, builds a hash map from the value of \texttt{col} to a running aggregate state (sum + count for AVG; running min for MIN; etc.), and after the input is exhausted, emits one row per group with the final aggregate value.
+
+The executor is short --- about 200 lines of code for all seven operators combined --- and is the same code you would write for the simpler version of this project. The reason is that the project is about the optimizer; making the executor sophisticated would not change which plans the optimizer chooses.
+
+\section{Phase 1 --- Parser, Catalog, and Executor}
+
+The goal of Phase 1 is an end-to-end query pipeline with no optimizer at all: queries parse into the naive plan from Section 4, execute correctly, and produce results. The catalog and statistics are loaded but not yet used.
+
+Build:
+\begin{itemize}
+\item The hand-written SQL parser for the grammar in Section 5.
+\item The logical-plan tree representation.
+\item The catalog with table schemas and base statistics; load by scanning each CSV once at startup. Cache to \texttt{catalog.json}.
+\item The materialized executor with all seven operators.
+\item A naive plan builder that turns the parsed query into the unoptimized plan tree (FROM order, all predicates filtered on top of cross products).
+\item The \texttt{qopt} shell with \texttt{LOAD}, \texttt{QUERY}, \texttt{EXPLAIN}, and \texttt{\textbackslash stats} commands.
+\end{itemize}
+
+At the end of Phase 1, every query in the benchmark suite should run and produce the right answer. Two-table queries should be reasonably fast (a few seconds at worst); three- and four-table queries on the benchmark dataset will be very slow because of the cross-product blowup. This is expected and is what Phase 2 will fix.
+
+\section{Phase 2 --- The Rule Rewriter and the Cost Model}
+
+The goal of Phase 2 is to add the four rewrite rules and the cost model. Join-order search comes in Phase 3.
+
+Build:
+\begin{itemize}
+\item The four rules from Section 7: predicate pushdown, projection pushdown, constant folding, join input swap. Each is a recursive function that walks the plan tree and returns a transformed tree.
+\item The fixed-point loop that applies them in order until none changes the plan.
+\item The cost model from Section 8: cardinality estimates for each operator, the cost function, and a top-level \texttt{cost(plan)} function.
+\item Update \texttt{EXPLAIN} to print the chosen plan, its estimated cardinality at each operator, and the total estimated cost.
+\end{itemize}
+
+At the end of Phase 2, two-table queries with selective filters should be dramatically faster than in Phase 1 because predicate pushdown filters the base tables before the join. Three- and four-table queries are also faster, but join-order is still the FROM order; Phase 3 will fix that.
+
+\subsection{Validation}
+For each two-table query in the benchmark, verify by hand that the chosen plan applies pushdown correctly. Instrument the executor to log the actual cardinality at each operator. Compare to the estimated cardinality. The ratio should be within 2$\times$ for selective predicates; if it is wildly off (10$\times$ or more), there is a bug in the cost model.
+
+\section{Phase 3 --- Join-Order Search and Benchmark}
+
+The goal of Phase 3 is the Selinger DP and the benchmark.
+
+Build:
+\begin{itemize}
+\item The bitmap subset enumeration: iterate subsets in size order.
+\item The DP table: subset $\to$ (cost, cardinality, best plan).
+\item The split enumeration for each subset: try every singleton on the right.
+\item The connectedness check: skip splits that would produce a cross product.
+\item Plan reconstruction from the DP table.
+\item Integration: after rule rewriting, extract the set of base tables and join conditions from the plan, run the DP, and replace the plan with the result.
+\item The benchmark suite (see below).
+\end{itemize}
+
+\subsection{The Benchmark Dataset}
+A four-table schema (a small TPC-H-like sales scenario):
+
+\begin{itemize}
+\item \texttt{customers} (10{,}000 rows): id, name, country (24 distinct), age.
+\item \texttt{orders} (500{,}000 rows): id, customer\_id, total, year (5 distinct), status.
+\item \texttt{line\_items} (2{,}000{,}000 rows): order\_id, product\_id, qty, price.
+\item \texttt{products} (50{,}000 rows): id, name, category (87 distinct), supplier\_id.
+\end{itemize}
+
+You generate this data deterministically from a fixed seed using a small CSV generator program. The exact distributions are up to you, but document them.
+
+\subsection{The Benchmark Queries}
+Run these queries against four optimizer configurations: (1) no optimization, (2) rules only, (3) DP only (no rules), (4) full optimizer (rules then DP). For each query and configuration, report the estimated cost, the actual runtime, and the actual result cardinality. The required queries:
+
+\begin{enumerate}
+\item \textbf{Q1 (two-table, selective):} \texttt{SELECT * FROM customers, orders WHERE customers.id = orders.customer\_id AND customers.country = 'PK'}. Expected: full optimizer beats no-optimizer by at least 100$\times$; rules alone get most of the win; DP alone helps less because there are only two tables.
+
+\item \textbf{Q2 (three-table, selective):} the example from Section 2. Expected: full optimizer wins by at least 100$\times$; both rules and DP contribute.
+
+\item \textbf{Q3 (four-table, selective):} \texttt{SELECT customers.name, products.name FROM customers, orders, line\_items, products WHERE customers.id = orders.customer\_id AND orders.id = line\_items.order\_id AND line\_items.product\_id = products.id AND customers.country = 'PK' AND products.category = 'Electronics'}. Expected: full optimizer wins enormously; suboptimal join orders cause intermediate explosions.
+
+\item \textbf{Q4 (aggregation):} \texttt{SELECT customers.country, SUM(orders.total) FROM customers, orders WHERE customers.id = orders.customer\_id AND orders.year = 2024 GROUP BY customers.country}. Expected: rules win (predicate pushdown on \texttt{year}).
+
+\item \textbf{Q5 (adversarial):} a query specifically constructed to trip up a naive optimizer. Multiple selective filters but on the join's larger side, so that filtering early makes the difference. The full optimizer should still win.
+\end{enumerate}
+
+The benchmark output goes in the design document as a $5 \times 4$ table of speedups, plus a discussion of which component (rules vs. DP) contributes how much per query.
+
+\subsection{Estimate Accuracy Table}
+For Q3 specifically (the four-table query), report the estimated and actual cardinality at every intermediate result in the chosen plan. This is the table real database engineers use to debug bad cost models, and you will use it to identify any large estimation errors in your model.
+
+\section{Deliverables and Submission}
+
+\subsection{What to Submit}
+A single zip archive containing:
+
+\begin{itemize}
+\item Complete source tree of the optimizer (\texttt{qopt}), the CSV data generator, and the benchmark driver.
+\item A \texttt{Makefile} (or \texttt{CMakeLists.txt}) that builds everything with one command on a recent Ubuntu LTS.
+\item A \texttt{README.md} with build instructions, supported queries, and limitations.
+\item A \texttt{design.pdf} of at most 13 pages describing: the six-component architecture; the parser and grammar; the catalog and statistics; each of the four rewrite rules with a worked example; the cardinality estimation formulas including the System R join formula; the cost function; the Selinger DP algorithm and how splits are enumerated; the executor's seven operators; and a detailed discussion of the benchmark results including the estimate-accuracy table for Q3.
+\item A \texttt{benchmark/} directory with the data generator, the benchmark driver, and the output of your final run.
+\item A \texttt{tests/} directory with unit tests for: the parser, each of the four rewrite rules in isolation, the cardinality estimator (verify formulas against hand-computed examples), the Selinger DP (verify on a 3-table example with known optimal plan), and end-to-end query correctness.
+\end{itemize}
+
+\subsection{Archive Naming}
+\texttt{Group[Number]\_Project02\_Optimizer.zip}, for example \texttt{Group17\_Project02\_Optimizer.zip}.
+
+\subsection{Demonstration}
+Each group will present a 25-minute live demonstration. First, a walkthrough of the optimizer pipeline using the design document, with particular attention to the Selinger DP. Second, a live execution of the benchmark, with the instructor free to type new queries on the spot and inspect the chosen plans via \texttt{EXPLAIN}. Third, a short oral examination in which each group member will be asked to explain, without notes, a specific component, with particular focus on the cost model formulas (especially the System R join cardinality formula) and on why predicate pushdown is correct (why pushing a filter through a join does not change the result). All group members must be present.
+
+\section{Bonus Opportunities}
+
+Each independent. Up to 20 percentage points total.
+
+\subsection{Bushy Join Trees (up to 5\%)}
+The base project uses left-deep trees only. Extend the DP to consider bushy trees: for each subset $S$, instead of splitting into $L \cup \{t\}$, enumerate all splits $L \cup R$ where both $L$ and $R$ are non-empty subsets of $S$. The search space and runtime grow significantly, but bushy trees can be much better than left-deep when intermediate results are unbalanced. Demonstrate at least one query where bushy beats left-deep by a measurable margin.
+
+\subsection{Histograms for Range Selectivity (up to 10\%)}
+Replace the simple min--max range estimate for range predicates with equi-depth histograms. Each numeric column gets a histogram of, say, 32 buckets, where each bucket holds approximately the same number of rows. Range selectivity is then computed by summing the buckets that fall within the range. This dramatically improves accuracy on skewed distributions. The benchmark must include a query with a skewed distribution where histograms produce a noticeably better plan than the base estimator.
+
+\subsection{Sort-Merge Join as an Alternative (up to 5\%)}
+The base project uses hash join exclusively. Add sort-merge join as a second physical join algorithm. The optimizer chooses between hash and sort-merge based on cost (sort-merge is typically better when both inputs are already sorted on the join key, which can happen if a previous operator produced sorted output). Discuss the cost model for sort-merge in the design document.
+
+\section{Constraints and Prohibitions}
+
+\begin{notebox}[The Following Will Result in Loss of Credit]
+\begin{itemize}
+\item Use of any existing SQL parser, query optimizer, or database engine as a component of your implementation. Includes SQLite, DuckDB, libpg\_query, ANTLR-generated parsers for SQL, and bindings.
+
+\item Use of any existing parser-generator (yacc, bison, ANTLR). The parser must be hand-written recursive descent.
+
+\item Use of any existing binary serialization library for the catalog or any other state.
+
+\item Hard-coding the join order based on table size or schema knowledge instead of running the DP. The optimizer must produce its plan via the cost model and search.
+
+\item Producing wrong query results. The chaos test will run every benchmark query and verify the result against an independent reference (the unoptimized baseline). Plans that produce wrong rows fail the project.
+
+\item Use of Python at any layer, including the data generator and the benchmark driver. Tests and scripts must be in C, C++, shell, or JavaScript.
+
+\item Submitting code whose commit history shows large, infrequent commits.
+\end{itemize}
+\end{notebox}
+
+\section{Required Reading}
+
+\begin{enumerate}
+\item Selinger, P. G., Astrahan, M. M., Chamberlin, D. D., Lorie, R. A., and Price, T. G. ``Access Path Selection in a Relational Database Management System.'' \textit{ACM SIGMOD}, 1979. The paper that introduced cost-based join ordering. Sections 3 and 4 describe exactly the algorithm you will implement. \textbf{Required reading before Phase 3}; the manual you are reading now is a summary, but the paper is the original.
+
+\item Graefe, G. ``Query Evaluation Techniques for Large Databases.'' \textit{ACM Computing Surveys}, 1993. A comprehensive survey of query execution and optimization. Sections on join algorithms (4) and on optimizer architecture (10) are the relevant ones. Reference material; skim it during Phases 1 and 2.
+
+\item Ramakrishnan, R. and Gehrke, J. \textit{Database Management Systems}, 3rd edition, Chapter 12 (``Overview of Query Evaluation'') and Chapter 14 (``A Typical Relational Query Optimizer''). The textbook treatment of everything in this manual. Read 12.1 and 14.1 before Phase 1; 14.2--14.4 before Phase 3.
+
+\item Leis, V. et al. ``How Good Are Query Optimizers, Really?'' \textit{Proceedings of the VLDB Endowment}, 2015. A modern empirical study of how cardinality estimation errors propagate through plans. Optional but illuminating; explains why your cost model's accuracy matters so much.
+
+\item Pavlo, A. \textit{CMU 15-445 Database Systems}. Lectures 12--14 cover query execution; lectures 14--16 cover optimization. Freely available on the CMU course website.
+\end{enumerate}
+
+\footerboxes
+\end{document}
