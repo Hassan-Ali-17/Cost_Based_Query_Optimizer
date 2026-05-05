@@ -14,6 +14,7 @@ void print_help() {
     cout << "  LOAD <data_dir>   - Load catalog from CSV files\n";
     cout << "  QUERY <sql>       - Execute a SQL query (with optimization)\n";
     cout << "  EXPLAIN <sql>     - Show the optimized logical plan\n";
+    cout << "  \\validate <sql>  - Compare Estimated vs Actual row counts\n";
     cout << "  \\stats           - Print catalog statistics\n";
     cout << "  exit              - Exit the shell\n";
 }
@@ -66,6 +67,25 @@ int main(int argc, char** argv) {
                 else cout << "  (empty plan)\n";
             } catch (const exception& e) {
                 cout << "Error parsing/optimizing query: " << e.what() << "\n";
+            }
+        } else if (line.rfind("\\validate ", 0) == 0) {
+            string sql = line.substr(10);
+            try {
+                Query q = parser.parse(sql);
+                auto plan = planner.build_naive_plan(q);
+                
+                optimizer.clear_stats();
+                auto optimized_plan = optimizer.optimize(plan);
+                
+                // Run it to get actual stats
+                executor.last_run_stats.clear();
+                executor.execute(optimized_plan);
+                
+                cout << "validation plan (Estimated vs Actual):\n";
+                if (optimized_plan) optimized_plan->print(1, &optimizer, &executor);
+                else cout << "  (empty plan)\n";
+            } catch (const exception& e) {
+                cout << "Error during validation: " << e.what() << "\n";
             }
         } else if (line.rfind("QUERY ", 0) == 0 || line.rfind("SELECT", 0) == 0 || line.rfind("select", 0) == 0) {
             string sql = line;
