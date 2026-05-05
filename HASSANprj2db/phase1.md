@@ -34,7 +34,7 @@ Here is what each file in the `src/` directory is responsible for:
 
 ### 1. `types.h`
 Defines the core data structures used by the engine. 
-- `Value`: A variant that can hold an `INT`, `DOUBLE`, or `TEXT` (string) value.
+- `Value`: A variant that can hold an `INT`, `DOUBLE`, or `TEXT` (string) value. Supports arithmetic (`+`, `/`) and comparison operators, as well as hashing for grouping.
 - `Row`: A simple vector of `Value`s representing a single row of data.
 - `TableSchema` & `ColumnSchema`: Defines the names and types of columns for a given table.
 
@@ -58,12 +58,14 @@ Defines the **Logical Plan Tree**.
 ### 5. `planner.h` / `planner.cpp`
 The Naive Plan Builder.
 - Takes the parsed `Query` AST and blindly constructs an unoptimized execution tree.
-- It iterates through the `FROM` clause and stacks `CrossProduct` operators, then places all `WHERE` clauses on top as `Filter` operators. This results in incredibly slow execution for large datasets—exactly what we will optimize in Phase 2.
+- It iterates through the `FROM` clause and stacks `CrossProduct` operators, then places all `WHERE` clauses on top as `Filter` operators.
+- Automatically inserts `GroupBy` nodes for queries with aggregates, even if an explicit `GROUP BY` clause is missing (global aggregates).
 
 ### 6. `executor.h` / `executor.cpp`
 The Materialized Execution Engine.
 - Evaluates the logical plan tree from the bottom up.
-- Each `execute_*` function processes input rows and returns a completely materialized `ExecResult` (containing the new `TableSchema` and the `std::vector<Row>`).
+- Each `execute_*` function processes input rows and returns a completely materialized `ExecResult`.
+- **Aggregation**: Implements a hash-based `GroupBy` operator that computes `SUM`, `COUNT`, `AVG`, `MIN`, and `MAX` for grouped or global results.
 - Physically performs nested loops for `CrossProduct`, iterates and evaluates conditions for `Filter`, and truncates rows for `Limit`.
 
 ### 7. `main.cpp`

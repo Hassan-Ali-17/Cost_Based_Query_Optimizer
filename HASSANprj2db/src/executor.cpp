@@ -123,23 +123,24 @@ ExecResult Executor::execute_project(const Project* proj) {
     ExecResult child_res = execute(proj->child);
     ExecResult res;
     
+    // In Phase 1, Project often follows GroupBy. 
+    // We need to map the "agg" column from GroupBy to the aggregate Expr in Project.
     for (const auto& expr : proj->exprs) {
         if (expr.type == ExprType::COLUMN) {
             res.schema.push_back(expr.col1);
         } else if (expr.type == ExprType::AGGREGATE) {
-            res.schema.push_back({"", "agg"});
+            res.schema.push_back({"", "agg"}); // Placeholder for aggregate name
         }
     }
     
-    // If there is an aggregate but no group by, we expect GroupBy to handle it.
-    // In naive planner, GroupBy handles aggregates.
     for (const auto& row : child_res.rows) {
         Row new_row;
         for (const auto& expr : proj->exprs) {
             if (expr.type == ExprType::COLUMN) {
                 new_row.values.push_back(row.values[get_col_index(expr.col1, child_res.schema)]);
-            } else {
-                new_row.values.push_back(Value(0)); // Aggregates handled in GroupBy
+            } else if (expr.type == ExprType::AGGREGATE) {
+                // Find the aggregate column in the child (GroupBy result)
+                new_row.values.push_back(row.values[get_col_index({"", "agg"}, child_res.schema)]);
             }
         }
         res.rows.push_back(new_row);
@@ -147,33 +148,77 @@ ExecResult Executor::execute_project(const Project* proj) {
     return res;
 }
 
+struct AggState {
+    Value val;
+    int count = 0;
+    bool first = true;
+};
+
 ExecResult Executor::execute_groupby(const GroupBy* gb) {
     ExecResult child_res = execute(gb->child);
     ExecResult res;
     
-    if (gb->col.column.empty()) {
-        // Global aggregate
-        res.schema.push_back({"", "agg"});
-        if (child_res.rows.empty()) return res;
-        
-        // Very basic aggregation placeholder
-        Row out; out.values.push_back(Value(0));
-        res.rows.push_back(out);
-        return res;
+    unordered_map<Value, AggState> groups;
+    bool has_group_col = !gb->col.column.empty();
+    
+    size_t agg_col_idx = 0;
+    bool has_agg_col = !gb->agg_col.column.empty();
+    if (has_agg_col) {
+        agg_col_idx = get_col_index(gb->agg_col, child_res.schema);
     }
     
-    size_t group_idx = get_col_index(gb->col, child_res.schema);
-    res.schema.push_back(gb->col);
+    size_t group_col_idx = 0;
+    if (has_group_col) {
+        group_col_idx = get_col_index(gb->col, child_res.schema);
+    }
+    
+    // Process rows
+    for (const auto& row : child_res.rows) {
+        Value group_key = has_group_col ? row.values[group_col_idx] : Value(0);
+        Value agg_val = has_agg_col ? row.values[agg_col_idx] : Value(1); // 1 for COUNT(*)
+        
+        AggState& state = groups[group_key];
+        if (state.first) {
+            state.val = (gb->agg == AggType::COUNT) ? Value(1) : agg_val;
+            state.count = 1;
+            state.first = false;
+        } else {
+            state.count++;
+            switch(gb->agg) {
+                case AggType::SUM:
+                case AggType::AVG:
+                    state.val = state.val + agg_val;
+                    break;
+                case AggType::COUNT:
+                    state.val = Value(get<int>(state.val.data) + 1);
+                    break;
+                case AggType::MIN:
+                    if (agg_val < state.val) state.val = agg_val;
+                    break;
+                case AggType::MAX:
+                    if (agg_val > state.val) state.val = agg_val;
+                    break;
+                default: break;
+            }
+        }
+    }
+    
+    // Build output
+    if (has_group_col) res.schema.push_back(gb->col);
     res.schema.push_back({"", "agg"});
     
-    // basic group by
-    for (const auto& row : child_res.rows) {
-        // placeholder grouping
-        Row new_row;
-        new_row.values.push_back(row.values[group_idx]);
-        new_row.values.push_back(Value(1));
-        res.rows.push_back(new_row);
+    for (auto& [key, state] : groups) {
+        Row out;
+        if (has_group_col) out.values.push_back(key);
+        
+        Value final_val = state.val;
+        if (gb->agg == AggType::AVG) {
+            final_val = state.val / state.count;
+        }
+        out.values.push_back(final_val);
+        res.rows.push_back(out);
     }
+    
     return res;
 }
 

@@ -41,7 +41,34 @@ struct Value {
     bool operator<=(const Value& other) const { return (*this < other) || (*this == other); }
     bool operator>(const Value& other) const { return !(*this <= other); }
     bool operator>=(const Value& other) const { return !(*this < other); }
+
+    Value operator+(const Value& other) const {
+        if (type == DataType::INT && other.type == DataType::INT) return Value(get<int>(data) + get<int>(other.data));
+        if (type == DataType::DOUBLE && other.type == DataType::DOUBLE) return Value(get<double>(data) + get<double>(other.data));
+        if (type == DataType::INT && other.type == DataType::DOUBLE) return Value(get<int>(data) + get<double>(other.data));
+        if (type == DataType::DOUBLE && other.type == DataType::INT) return Value(get<double>(data) + get<int>(other.data));
+        throw runtime_error("Invalid types for +");
+    }
+
+    Value operator/(int count) const {
+        if (count == 0) return Value(0.0);
+        if (type == DataType::INT) return Value(static_cast<double>(get<int>(data)) / count);
+        if (type == DataType::DOUBLE) return Value(get<double>(data) / count);
+        throw runtime_error("Invalid types for /");
+    }
 };
+
+// Hash for Value to use in unordered_map
+namespace std {
+    template <>
+    struct hash<Value> {
+        size_t operator()(const Value& v) const {
+            if (v.type == DataType::INT) return hash<int>{}(get<int>(v.data));
+            if (v.type == DataType::DOUBLE) return hash<double>{}(get<double>(v.data));
+            return hash<string>{}(get<string>(v.data));
+        }
+    };
+}
 
 struct Row {
     vector<Value> values;

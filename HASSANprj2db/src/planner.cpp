@@ -15,17 +15,21 @@ shared_ptr<LogicalPlan> Planner::build_naive_plan(const Query& query) {
         plan = make_shared<Filter>(pred, plan);
     }
 
-    // 3. GROUP BY clause
-    if (query.has_group_by) {
-        // Find aggregate in select list to know what to compute
-        AggType agg = AggType::NONE;
-        for (const auto& expr : query.select_list) {
-            if (expr.type == ExprType::AGGREGATE) {
-                agg = expr.agg;
-                break;
-            }
+    // 3. GROUP BY clause or Global Aggregates
+    bool has_agg = false;
+    AggType agg = AggType::NONE;
+    ColumnRef agg_col;
+    for (const auto& expr : query.select_list) {
+        if (expr.type == ExprType::AGGREGATE) {
+            has_agg = true;
+            agg = expr.agg;
+            agg_col = expr.col1;
+            break;
         }
-        plan = make_shared<GroupBy>(query.group_by_col, agg, plan);
+    }
+
+    if (query.has_group_by || has_agg) {
+        plan = make_shared<GroupBy>(query.group_by_col, agg_col, agg, plan);
     }
 
     // 4. SELECT clause (Projection)

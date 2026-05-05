@@ -55,10 +55,12 @@ public:
 
 class GroupBy : public LogicalPlan {
 public:
-    ColumnRef col;
+    ColumnRef col; // Grouping column
+    ColumnRef agg_col; // Column to aggregate
     AggType agg;
     shared_ptr<LogicalPlan> child;
-    GroupBy(const ColumnRef& c, AggType a, shared_ptr<LogicalPlan> ch) : col(c), agg(a), child(ch) {}
+    GroupBy(const ColumnRef& c, const ColumnRef& ac, AggType a, shared_ptr<LogicalPlan> ch) 
+        : col(c), agg_col(ac), agg(a), child(ch) {}
     void print(int indent = 0) const override;
 };
 

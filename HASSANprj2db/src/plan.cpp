@@ -84,9 +84,13 @@ void Project::print(int indent) const {
 
 void GroupBy::print(int indent) const {
     print_indent(indent);
-    std::cout << "GroupBy(";
-    if (!col.table.empty()) std::cout << col.table << ".";
-    std::cout << col.column << ")\n";
+    std::string agg_str = "SUM";
+    if (agg == AggType::COUNT) agg_str = "COUNT";
+    else if (agg == AggType::AVG) agg_str = "AVG";
+    else if (agg == AggType::MIN) agg_str = "MIN";
+    else if (agg == AggType::MAX) agg_str = "MAX";
+    
+    std::cout << "GroupBy(" << col.column << ", " << agg_str << "(" << agg_col.column << "))\n";
     child->print(indent + 1);
 }
 
