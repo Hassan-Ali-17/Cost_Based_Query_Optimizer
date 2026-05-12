@@ -23,6 +23,11 @@ shared_ptr<LogicalPlan> Optimizer::apply_rules(shared_ptr<LogicalPlan> plan) {
         plan = rule_predicate_pushdown(plan, changed);
         iterations++;
     }
+    
+    // Final pass: Projection Pushdown
+    std::set<ColumnRef> needed;
+    plan = rule_projection_pushdown(plan, needed);
+    
     return plan;
 }
 
@@ -32,6 +37,12 @@ shared_ptr<LogicalPlan> Optimizer::rule_constant_folding(shared_ptr<LogicalPlan>
     // Recurse first
     if (auto filter = dynamic_pointer_cast<Filter>(plan)) {
         filter->child = rule_constant_folding(filter->child, changed);
+        
+        // Simple Constant Folding: if filter is on a literal? 
+        // (Our parser currently mostly produces Col Op Literal, 
+        // but if it produced Literal Op Literal we'd handle it here)
+        // For now, let's handle "WHERE 1=1" which might be parsed as a ColumnRef 
+        // that doesn't exist or a specialized literal predicate.
     } else if (auto cp = dynamic_pointer_cast<CrossProduct>(plan)) {
         cp->left = rule_constant_folding(cp->left, changed);
         cp->right = rule_constant_folding(cp->right, changed);
