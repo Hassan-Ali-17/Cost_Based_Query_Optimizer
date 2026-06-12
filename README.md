@@ -28,18 +28,18 @@
 ██║     ██╔══██╗╚════╝╚════██║██║▄▄ ██║██║     ██║   ██║██╔═══╝    ██║   
 ╚██████╗██████╔╝      ███████║╚██████╔╝███████╗╚██████╔╝██║        ██║   
  ╚═════╝╚═════╝       ╚══════╝ ╚══▀▀═╝ ╚══════╝ ╚═════╝ ╚═╝        ╚═╝
- ```
- </div>
+```
+</div>
 
 > **Advanced Database Management — CS B, 4th Semester**
-> **Project 02 | Language: C / C++**
+> **Project 02 | Language: C++17**
 
 ---
 
 ## Group 12
 
-| Name | RoleNumber |
-|------|-------------------|
+| Name | Roll Number |
+|------|-------------|
 | Hassan Ali Shah | BSCS24040 |
 | Abdul Moeed | BSCS24140 |
 | Ahsen Ali | BSCS24056 |
@@ -53,16 +53,15 @@
 - [Architecture](#architecture)
 - [Features](#features)
 - [Prerequisites](#prerequisites)
+- [Project Structure](#project-structure)
 - [Building the Project](#building-the-project)
 - [Running the Optimizer](#running-the-optimizer)
 - [Supported SQL Subset](#supported-sql-subset)
 - [Shell Commands](#shell-commands)
 - [Benchmark](#benchmark)
-- [Project Structure](#project-structure)
 - [Implementation Phases](#implementation-phases)
 - [Optimization Components](#optimization-components)
 - [Example Session](#example-session)
-- [Running Tests](#running-tests)
 - [Known Limitations](#known-limitations)
 - [Required Reading](#required-reading)
 
@@ -70,7 +69,7 @@
 
 ## Overview
 
-`CB-SQLopt` is a cost-based SQL query optimizer built from scratch in C/C++. It accepts a small but realistic SQL subset, maintains per-column catalog statistics, applies four rewrite rules, and uses the **Selinger dynamic programming algorithm** (the same algorithm at the core of System R, PostgreSQL, and DB2 since 1979) to choose the cheapest join order.
+`CB-SQLopt` is a cost-based SQL query optimizer built from scratch in **C++17**. It accepts a small but realistic SQL subset, maintains per-column catalog statistics, applies four rewrite rules, and uses the **Selinger dynamic programming algorithm** (the same algorithm at the core of System R, PostgreSQL, and DB2 since 1979) to choose the cheapest join order.
 
 The optimizer makes a visible, measurable difference: on adversarial multi-table queries it achieves speedups of **100× to 1000×** over the unoptimized baseline by pushing filters early and reordering joins to minimize intermediate result sizes.
 
@@ -106,33 +105,33 @@ The system has six strictly separated components:
         |
         v
   +-----------+
-  |  Parser   |  Hand-written recursive-descent, ~250 lines of C
+  |  Parser   |  Hand-written recursive-descent parser (parser.cpp)
   +-----------+
         |
         v
   +-----------+
-  |  Catalog  |  Table schemas, row counts, per-column statistics
+  |  Catalog  |  Table schemas, row counts, per-column statistics (catalog.cpp)
   +-----------+
         |
         v
   +-----------+
-  |  Rewriter |  4 rule-based transformations (predicate pushdown, etc.)
+  |  Rewriter |  4 rule-based transformations (optimizer.cpp)
   +-----------+
         |
         v
   +-----------+
-  | Cost Model|  Cardinality estimation using catalog stats
+  | Cost Model|  Cardinality estimation using catalog stats (optimizer.cpp)
   +-----------+
         |
         v
   +-----------+
-  | Join-Order|  Selinger DP over subsets of base tables
+  | Join-Order|  Selinger DP over subsets of base tables (optimizer.cpp)
   |  Search   |
   +-----------+
         |
         v
   +-----------+
-  | Executor  |  Materialized operator model (no Volcano iterators)
+  | Executor  |  Materialized operator model (executor.cpp)
   +-----------+
 ```
 
@@ -140,18 +139,18 @@ The system has six strictly separated components:
 
 ## Features
 
-- Hand-written recursive-descent SQL parser (no parser generators)
-- Catalog with per-table and per-column statistics (row count, distinct values, min/max)
+- Hand-written recursive-descent SQL parser — no parser generators (parser.cpp / parser.h)
+- Catalog with per-table and per-column statistics: row count, distinct values, min/max (catalog.cpp / catalog.h)
 - Statistics cached to `catalog.json` after first load
-- **Four rewrite rules:**
+- **Four rewrite rules** (optimizer.cpp):
   - Predicate pushdown (most impactful)
   - Projection pushdown
   - Constant folding
   - Join input swap
-- **Selinger DP join ordering** — bitmap-based, O(n² · 2ⁿ), handles up to 4 tables (8 with bonus)
-- Materialized executor with 7 operators: Scan, Filter, Project, HashJoin, CrossProduct, Limit, GroupBy
-- Interactive shell with `EXPLAIN`, `\stats`, and benchmark mode
-- Side-by-side plan comparison (optimized vs unoptimized)
+- **Selinger DP join ordering** — bitmap-based, O(n² · 2ⁿ), handles up to 4 tables
+- Materialized executor with 7 operators: Scan, Filter, Project, HashJoin, CrossProduct, Limit, GroupBy (executor.cpp)
+- Interactive shell with `EXPLAIN`, `\stats`, `\validate`, and benchmark mode
+- Side-by-side plan comparison (estimated vs. actual row counts)
 
 ---
 
@@ -161,68 +160,144 @@ On Ubuntu/Debian:
 
 ```bash
 sudo apt update
-sudo apt install build-essential gcc g++ make
+sudo apt install build-essential g++ make cmake
 ```
-
-No external libraries required. Everything is implemented from scratch including the parser, catalog, cost model, and executor.
 
 Verify your compiler:
 
 ```bash
-gcc --version   # GCC 9+ recommended
-g++ --version
+g++ --version   # GCC 9+ with C++17 support recommended
+```
+
+No external libraries required except **nlohmann/json** for catalog serialization — automatically fetched via CMake's `FetchContent`.
+
+---
+
+## Project Structure
+
+```
+hassan-ali-17-cost_based_query_optimizer/
+├── README.md
+├── LICENSE
+├── phase1/                        # Phase 1: Parser, Catalog, Executor (no optimizer)
+│   ├── CMakeLists.txt
+│   ├── customers.csv
+│   ├── orders.csv
+│   ├── line_items.csv
+│   ├── products.csv
+│   └── src/
+│       ├── main.cpp               # Shell entry point
+│       ├── parser.cpp             # Hand-written recursive-descent SQL parser
+│       ├── catalog.cpp            # Table/column statistics, catalog.json I/O
+│       ├── plan.cpp               # Logical plan tree representation
+│       ├── planner.cpp            # Naive plan builder (FROM order, cross products)
+│       ├── executor.cpp           # Materialized operator model (7 operators)
+│       └── include/
+│           ├── parser.h
+│           ├── catalog.h
+│           ├── plan.h
+│           ├── planner.h
+│           ├── executor.h
+│           └── types.h
+│
+├── phase2/                        # Phase 2: Rule Rewriter + Cost Model
+│   ├── CMakeLists.txt
+│   ├── customers.csv
+│   ├── orders.csv
+│   ├── line_items.csv
+│   ├── products.csv
+│   └── src/
+│       ├── main.cpp
+│       ├── parser.cpp
+│       ├── catalog.cpp
+│       ├── plan.cpp
+│       ├── planner.cpp
+│       ├── executor.cpp
+│       ├── optimizer.cpp          # Rule rewriter + cost model (Phase 2)
+│       └── include/
+│           ├── parser.h
+│           ├── catalog.h
+│           ├── plan.h
+│           ├── planner.h
+│           ├── executor.h
+│           ├── optimizer.h
+│           └── types.h
+│
+└── phase 3/                       # Phase 3: Selinger DP Join-Order Search (Complete)
+    ├── CMakeLists.txt
+    ├── customers.csv
+    ├── orders.csv
+    ├── line_items.csv
+    ├── products.csv
+    └── src/
+        ├── main.cpp               # Shell with EXPLAIN, \validate, \benchmark
+        ├── parser.cpp
+        ├── catalog.cpp
+        ├── plan.cpp
+        ├── planner.cpp
+        ├── executor.cpp
+        ├── optimizer.cpp          # Full optimizer: rules + Selinger DP
+        └── include/
+            ├── parser.h
+            ├── catalog.h
+            ├── plan.h
+            ├── planner.h
+            ├── executor.h
+            ├── optimizer.h
+            └── types.h
 ```
 
 ---
 
 ## Building the Project
 
+### Using CMake (recommended, any phase)
+
 ```bash
-# Clone the repository
-git clone https://github.com/Hassan-Ali-17/Cost_Based_Query_Optimizer.git
-cd Group12_Project02_Optimizer
-
-# Build everything (optimizer + data generator + benchmark driver)
-make
-
-# Clean build artifacts
-make clean
-
-# Build and run tests
-make test
+# Build Phase 3 (complete optimizer)
+cd "phase 3"
+cmake -S . -B build
+cmake --build build
+./build/qopt
 ```
 
-The `make` command produces three binaries:
+### Using g++ directly
 
-| Binary | Purpose |
-|--------|---------|
-| `CB-SQLopt` | The main optimizer shell |
-| `datagen` | Benchmark dataset CSV generator |
-| `bench` | Automated benchmark driver |
+**Linux / WSL:**
+```bash
+cd "phase 3"
+g++ src/*.cpp -I src/include -std=c++17 -o qopt
+./qopt
+```
+
+**Windows (MinGW/g++):**
+```powershell
+cd "phase 3"
+g++ src/catalog.cpp src/executor.cpp src/main.cpp src/optimizer.cpp src/parser.cpp src/plan.cpp src/planner.cpp -I src/include -std=c++17 -o qopt.exe
+.\qopt.exe
+```
+
+> **Note:** On Windows, PowerShell does not auto-expand wildcards for g++, so list source files individually as shown above.
 
 ---
 
 ## Running the Optimizer
 
 ```bash
-# Generate the benchmark dataset first (required for BENCH)
-./datagen --seed 42 --out ./benchdata
-
 # Start the optimizer shell
-./qopt --data ./benchdata
+./qopt
+
+# Or load data directory at launch
+./qopt --data .
 ```
 
-You will see:
+You will see the `qopt>` prompt. Load the CSV data:
 
 ```
-qopt: opened catalog with 4 tables
-  customers   10,000 rows  (id INT PK, name TEXT, country TEXT, age INT)
-  orders     500,000 rows  (id INT PK, customer_id INT, total DOUBLE, year INT, status TEXT)
-  line_items 2,000,000 rows (order_id INT, product_id INT, qty INT, price DOUBLE)
-  products    50,000 rows  (id INT PK, name TEXT, category TEXT, supplier_id INT)
-qopt: stats loaded for 4 tables, 16 columns
-qopt>
+qopt> LOAD .
 ```
+
+The shell will scan the CSV files, compute statistics, and cache them to `catalog.json`.
 
 ---
 
@@ -236,14 +311,14 @@ FROM table [, table ...]
 [LIMIT integer]
 ```
 
-**Select list:** `*`, columns, aggregates (`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`), expressions (`qty * price`)
+**Select list:** `*`, columns, aggregates (`SUM`, `COUNT`, `AVG`, `MIN`, `MAX`)
 
 **Predicates:**
 - `column = literal` — equality filter
 - `column < literal` — range filter (also `<=`, `>`, `>=`, `!=`)
 - `column = column` — join condition
 
-**Not supported:** `OR`, `ORDER BY`, `HAVING`, `DISTINCT`, `OUTER JOIN`, subqueries
+**Not supported:** `OR`, `ORDER BY`, `HAVING`, `DISTINCT`, `OUTER JOIN`, subqueries, `SUM(col * col)` expressions
 
 ---
 
@@ -251,26 +326,26 @@ FROM table [, table ...]
 
 | Command | Description |
 |---------|-------------|
+| `LOAD <dir>` | Load catalog statistics from CSV files in `<dir>` |
 | `SELECT ...` | Run a query through the full optimizer pipeline |
 | `EXPLAIN SELECT ...` | Show the chosen plan with estimated costs and cardinalities |
-| `EXPLAIN NOOPT SELECT ...` | Show the unoptimized naive plan for comparison |
-| `\stats` | Print session statistics (queries run, average speedup, plan time) |
-| `\catalog` | Print the full catalog with all column statistics |
-| `BENCH run` | Run the 5 required benchmark queries against all 4 optimizer configurations |
-| `\quit` | Exit the shell |
+| `\validate <sql>` | Execute and compare estimated vs. actual row counts per operator |
+| `\stats` | Print catalog statistics (table/column info) |
+| `\benchmark` | Run the 5 required benchmark queries against all 4 optimizer configurations |
+| `exit` / `quit` | Exit the shell |
 
 ---
 
 ## Benchmark
 
-The benchmark runs 5 queries against 4 optimizer configurations:
+The `\benchmark` command runs 5 queries against 4 optimizer configurations:
 
 | Config | Description |
 |--------|-------------|
-| None | No optimization — naive FROM-order cross products |
-| Rules only | Predicate/projection pushdown + constant folding |
-| DP only | Join ordering without rewrite rules |
-| Full | Rules + Selinger DP (the complete optimizer) |
+| `no-opt` | No optimization — naive FROM-order cross products |
+| `rules-only` | Predicate/projection pushdown + constant folding |
+| `dp-only` | Join ordering via Selinger DP without rewrite rules |
+| `full` | Rules + Selinger DP (the complete optimizer) |
 
 ### Benchmark Queries
 
@@ -281,7 +356,7 @@ WHERE customers.id = orders.customer_id
   AND customers.country = 'PK';
 ```
 
-**Q2** — Three-table, selective (the example from the session above):
+**Q2** — Three-table, selective:
 ```sql
 SELECT customers.name, SUM(line_items.qty * line_items.price)
 FROM customers, orders, line_items
@@ -313,211 +388,120 @@ GROUP BY customers.country;
 
 **Q5** — Adversarial (selective filters on the larger side):
 ```sql
--- Constructed to trip up naive optimizers
--- Full optimizer still wins
-```
-
-Run the benchmark:
-
-```bash
-./qopt --data ./benchdata
-qopt> BENCH run
-```
-
-Expected output is a 5×4 table of speedups. Full optimizer should achieve at least **100× speedup** on Q2 and Q3.
-
----
-
-## Project Structure
-
-```
-Group12_Project02_Optimizer/
-├── Makefile
-├── README.md
-├── src/
-│   ├── main.c            # Shell entry point
-│   ├── parser.c          # Hand-written recursive-descent SQL parser
-│   ├── parser.h
-│   ├── catalog.c         # Table/column statistics, catalog.json I/O
-│   ├── catalog.h
-│   ├── plan.c            # Logical plan tree representation
-│   ├── plan.h
-│   ├── rewriter.c        # Four rewrite rules (fixed-point loop)
-│   ├── rewriter.h
-│   ├── cost.c            # Cardinality estimation + cost function
-│   ├── cost.h
-│   ├── joinorder.c       # Selinger DP over bitmap subsets
-│   ├── joinorder.h
-│   ├── executor.c        # Materialized operator model (7 operators)
-│   └── executor.h
-├── datagen/
-│   └── datagen.c         # Benchmark CSV generator (fixed seed)
-├── benchmark/
-│   ├── bench.c           # Automated benchmark driver
-│   ├── run_bench.sh      # Shell script to run full benchmark
-│   └── results/          # Final benchmark output (populated after run)
-├── tests/
-│   ├── test_parser.c     # Parser unit tests
-│   ├── test_rewriter.c   # Each rewrite rule in isolation
-│   ├── test_cost.c       # Cardinality estimator vs hand-computed values
-│   ├── test_joinorder.c  # DP on 3-table example with known optimal plan
-│   └── test_e2e.sh       # End-to-end query correctness tests
-├── benchdata/            # Generated benchmark CSVs (after running datagen)
-│   ├── customers.csv
-│   ├── orders.csv
-│   ├── line_items.csv
-│   └── products.csv
-└── design.pdf            # Architecture and design document (max 13 pages)
+SELECT customers.name FROM customers, orders
+WHERE customers.id = orders.customer_id
+  AND orders.total > 1000
+  AND customers.age > 30;
 ```
 
 ---
 
 ## Implementation Phases
 
-### Phase 1 — Parser, Catalog, and Executor
+### Phase 1 — Parser, Catalog, and Executor (`phase1/`)
 
-**Goal:** End-to-end query pipeline with no optimizer.
+End-to-end query pipeline with no optimizer. Queries parse into a naive plan (FROM order, cross products on top), execute correctly, and produce results. The catalog loads statistics but does not yet use them for planning.
 
-- Hand-written SQL parser for the supported grammar
-- Logical plan tree (`Scan`, `Filter`, `Join`, `Project`, `GroupBy`, `Limit`)
-- Catalog loaded from CSV files at startup, cached to `catalog.json`
-- Materialized executor with all 7 operators
-- Naive plan builder (FROM order, all predicates on top)
-- `qopt` shell with `LOAD`, `QUERY`, `EXPLAIN`, `\stats`
+Key files: `parser.cpp`, `catalog.cpp`, `planner.cpp`, `executor.cpp`
 
-**Success criterion:** Every benchmark query runs and produces correct results.
+### Phase 2 — Rule Rewriter and Cost Model (`phase2/`)
 
----
+Adds the `optimizer.cpp` module with four rewrite rules applied in a fixed-point loop, plus the cost model using catalog statistics for cardinality estimation. `EXPLAIN` now shows estimated costs and row counts per operator.
 
-### Phase 2 — Rule Rewriter and Cost Model
+Key additions: `optimizer.cpp` / `optimizer.h`
 
-**Goal:** Add rewrite rules and cardinality estimation.
+### Phase 3 — Join-Order Search and Benchmark (`phase 3/`)
 
-**Four rewrite rules (applied in this order):**
-
-1. **Constant folding** — `2024 = 2024` → `TRUE`, `1 > 2` → prune branch
-2. **Predicate pushdown** — move filters below joins, as close to scans as possible
-3. **Projection pushdown** — carry only needed columns through the plan
-4. Repeat 1–3 until fixed point, then **join input swap** after DP
-
-**Cost model (System R formulas):**
-
-| Operator | Cardinality estimate |
-|----------|---------------------|
-| `Scan(t)` | `t.row_count` |
-| `Filter(pred, child)` | `child.card × selectivity(pred)` |
-| `Join(col1=col2, L, R)` | `L.card × R.card / max(distinct(col1), distinct(col2))` |
-
-**Selectivity formulas:**
-- `col = literal` → `1 / distinct_count(col)`
-- `col < literal` → `(literal - min) / (max - min)` clamped to [0,1]
-- Multiple AND predicates → multiply selectivities (independence assumption)
+Adds the Selinger DP algorithm to `optimizer.cpp`. After rule rewriting, the optimizer extracts base tables and join conditions, runs DP over all bitmask subsets to find the cheapest left-deep join tree, and replaces the plan. The `\benchmark` and `\validate` commands are also added in this phase.
 
 ---
 
-### Phase 3 — Join-Order Search and Benchmark
+## Optimization Components
 
-**Goal:** Selinger DP and the full benchmark.
+### Predicate Pushdown
+Moves `Filter` nodes below `Join`/`CrossProduct` nodes so filters are applied as close to the scan as possible. Single-table conjuncts are pushed down; multi-table conjuncts become join conditions. This also converts `CrossProduct` nodes into `HashJoin` nodes when an equijoin predicate connects both sides.
 
-**Selinger DP algorithm:**
+### Projection Pushdown
+Propagates only the columns needed downstream (SELECT list, predicates, join keys) through the plan tree, inserting `Project` nodes above `Scan` nodes to prune unused columns early.
 
-```
-For each subset S of base tables (in size order, bottom-up):
-  For each way to split S into L + {t} (left plan + single right table):
-    If no join condition exists between L and t: skip (avoid cross products)
-    cost = cost(plan(L)) + cost(HashJoin(condition, plan(L), Scan(t)))
-    If cost < best[S]: best[S] = cost, record split
-Answer = best[{t1, t2, ..., tn}]
-```
+### Constant Folding
+Evaluates predicates where both sides are literals at planning time (`1 = 1` → remove filter; `1 = 2` → return empty). Runs before predicate pushdown so that trivial branches can be pruned.
 
-Subsets represented as bitmaps. With n ≤ 4 tables: 2⁴ = 16 subsets, essentially instantaneous.
+### Join Input Swap
+After cost estimation, swaps the left and right children of a `HashJoin` if the right side has a smaller estimated cardinality, ensuring the smaller relation is used as the hash build side.
 
-**Cost function:**
+### Selinger DP (Phase 3)
+Enumerates all bitmask subsets of base tables in increasing size order. For each subset, tries every way to split it into a left sub-plan and a single right table, picks the split with the lowest estimated cost, and records the best plan. Cross-product splits are skipped unless no join condition exists. The full-subset entry is the final optimal plan.
+
+**Cost formulas:**
 
 | Operator | Cost |
 |----------|------|
 | `Scan(t)` | `t.row_count` |
-| `Filter(pred, child)` | `child.cost + child.card` |
-| `HashJoin(cond, L, R)` | `L.cost + R.cost + 2×L.card + R.card + out.card` |
-| `CrossProduct(L, R)` | `L.cost + R.cost + L.card × R.card` (intentionally huge) |
+| `Filter(pred, child)` | `child.cost + child.cardinality` |
+| `HashJoin(cond, L, R)` | `L.cost + R.cost + 2×L.card + R.card + output.card` |
+| `CrossProduct(L, R)` | `L.cost + R.cost + L.card × R.card` |
+| `Project / Limit / GroupBy` | `child.cost + child.cardinality` |
+
+**Cardinality formulas:**
+
+| Operator | Estimate |
+|----------|---------|
+| `Scan(t)` | `t.row_count` |
+| `Filter(col = lit)` | `child.card / distinct_count(col)` |
+| `Filter(col < lit)` | `child.card × (lit - min) / (max - min)` |
+| `HashJoin(col1 = col2)` | `L.card × R.card / max(distinct(col1), distinct(col2))` |
 
 ---
 
 ## Example Session
 
 ```
-$ ./qopt --data ./benchdata
+$ ./qopt --data .
 
-qopt> SELECT customers.name, SUM(line_items.qty * line_items.price)
-      FROM customers, orders, line_items
-      WHERE customers.id = orders.customer_id
-        AND orders.id = line_items.order_id
-        AND customers.country = 'PK'
-        AND orders.year = 2024;
+qopt> EXPLAIN SELECT customers.name FROM customers, orders
+      WHERE customers.id = orders.customer_id AND customers.country = 'PK'
 
---- WITHOUT optimizer (left-deep, FROM order, no rewrites) ---
-estimated cost:  5,247,180,200
-actual time:     12.83 seconds
-result rows:     412
+optimized plan:
+  Project(customers.name) [Est: 2 rows, cost 30]
+    HashJoin(customers.id = orders.customer_id) [Est: 2 rows, cost 28]
+      Filter(customers.country = 'PK') [Est: 2 rows, cost 10]
+        Scan(customers) [Est: 5 rows, cost 5]
+      Scan(orders) [Est: 5 rows, cost 5]
 
---- WITH optimizer (rules + cost-based DP join ordering) ---
-estimated cost:  2,840,120
-actual time:     0.124 seconds
-result rows:     412
+qopt> \validate SELECT customers.name FROM customers, orders
+      WHERE customers.id = orders.customer_id AND customers.country = 'PK'
 
-speedup: 103.5x   |   plan cost ratio: 1847x
-estimate error:  customers 5%, orders 0.4%, joined 7%
-
-qopt> \stats
-queries executed:    1
-optimizer wins:      1  (avg speedup 103.5x)
-average plan time:   2.1 ms
-average exec time:   124 ms
-```
-
----
-
-## Running Tests
-
-```bash
-# Run all unit tests
-make test
-
-# Run individual test suites
-./tests/test_parser
-./tests/test_rewriter
-./tests/test_cost
-./tests/test_joinorder
-
-# Run end-to-end correctness tests
-bash tests/test_e2e.sh
-
-# Run the full benchmark (requires benchdata/)
-./datagen --seed 42 --out ./benchdata
-bash benchmark/run_bench.sh
+validation plan (Estimated vs Actual):
+  Project(customers.name) [Est: 2 rows, cost 30] [Actual: 3 rows]
+    HashJoin(customers.id = orders.customer_id) [Est: 2 rows] [Actual: 3 rows]
+      Filter(customers.country = 'PK') [Est: 2 rows] [Actual: 3 rows]
+        Scan(customers) [Est: 5 rows] [Actual: 5 rows]
+      Scan(orders) [Est: 5 rows] [Actual: 5 rows]
 ```
 
 ---
 
 ## Known Limitations
 
-- Maximum 4 tables per query (8 with bushy-tree bonus)
+- Maximum 4 tables per query in the base DP (the search is O(n² · 2ⁿ))
 - No `OR` predicates, no subqueries, no `ORDER BY`
+- No `SUM(col * col)` expressions in the select list (parser limitation)
 - Independence assumption for multi-column selectivity (no cross-column correlations)
-- Left-deep join trees only in base implementation
-- No per-column histograms (min–max range estimate used for range predicates)
+- Left-deep join trees only
+- No per-column histograms — min/max range estimate used for range predicates
 - No indexes — all scans are sequential
-- No transactions, no concurrent queries, no updates or deletes
+- No transactions, no concurrent queries, no DML (INSERT / UPDATE / DELETE)
 
 ---
 
 ## Required Reading
 
-1. Selinger et al. "Access Path Selection in a Relational Database Management System." ACM SIGMOD, 1979. *(The original paper — required before Phase 3)*
+1. Selinger et al. "Access Path Selection in a Relational Database Management System." ACM SIGMOD, 1979.
 2. Ramakrishnan & Gehrke. *Database Management Systems*, 3rd ed., Chapters 12 and 14.
 3. Graefe. "Query Evaluation Techniques for Large Databases." ACM Computing Surveys, 1993.
 4. Leis et al. "How Good Are Query Optimizers, Really?" VLDB, 2015.
-5. Pavlo. CMU 15-445 Database Systems, Lectures 12–16. *(Freely available online)*
+5. Pavlo. CMU 15-445 Database Systems, Lectures 12–16.
 
 ---
 
@@ -526,11 +510,7 @@ bash benchmark/run_bench.sh
 **Archive name:** `Group12_Project02_Optimizer.zip`
 
 **Contents:**
-- Complete source tree
-- `Makefile`
+- Complete source tree (all three phases)
+- `CMakeLists.txt` per phase
 - `README.md`
 - `design.pdf` (max 13 pages)
-- `benchmark/` directory with results
-- `tests/` directory with unit tests
-
----
